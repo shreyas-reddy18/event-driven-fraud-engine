@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Fraud Pipeline — Lambda functions, IAM roles, Kinesis trigger, and DLQ
+
+Parameters:
+  KinesisStreamArn:
+    Type: String
+  KinesisStreamName:
+    Type: String
+  DynamoDBTableName:
+    Type: String
+  SNSAlertTopicArn:
+    Type: String
+  FraudScoreThreshold:
+    Type: String
+    Default: "0.85"
+  VelocityMaxTx:
+    Type: String
+    Default: "10"
+  VelocityWindowSeconds:
+    Type: String
+    Default: "60"
+  ImpossibleTravelKmh:
+    Type: String
+    Default: "900"
+  AmountHardLimit:
+    Type: String
+    Default: "50000"
+  BlacklistCacheTtl:
+    Type: String
+    Default: "300"
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Dead Letter Queue for Kinesis processing failures
+  # ---------------------------------------------------------------------------
+  ProcessorDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: fraud-processor-dlq
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: alias/aws/sqs
+
+  # ---------------------------------------------------------------------------
+  # IAM Roles
+  # ---------------------------------------------------------------------------
+  IngestionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: fraud-ingestion-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: KinesisPut
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: kinesis:PutRecord
+                Resource: !Ref KinesisStreamArn
+
+  ProcessorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: fraud-processor-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ProcessorPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:DescribeStream
+                  - kinesis:DescribeStreamSummary
+                  - kinesis:ListStreams
+                  - kinesis:ListShards
+                Resource: !Ref KinesisStreamArn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: "*"
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref SNSAlertTopicArn
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt ProcessorDLQ.Arn
+
+  # ---------------------------------------------------------------------------
+  # Lambda Functions
+  # ---------------------------------------------------------------------------
+  IngestionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: fraud-ingestion
+      Runtime: python3.12
+      Handler: src.ingestion.handler.handler
+      Role: !GetAtt IngestionLambdaRole.Arn
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          KINESIS_STREAM_NAME: !Ref KinesisStreamName
+          DYNAMODB_TABLE_NAME: !Ref DynamoDBTableName
+          SNS_ALERT_TOPIC_ARN: !Ref SNSAlertTopicArn
+          DLQ_URL: !Ref ProcessorDLQ
+
+  ProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: fraud-processor
+      Runtime: python3.12
+      Handler: src.processor.handler.handler
+      Role: !GetAtt ProcessorLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          KINESIS_STREAM_NAME: !Ref KinesisStreamName
+          DYNAMODB_TABLE_NAME: !Ref DynamoDBTableName
+          SNS_ALERT_TOPIC_ARN: !Ref SNSAlertTopicArn
+          DLQ_URL: !Ref ProcessorDLQ
+          VELOCITY_MAX_TX: !Ref VelocityMaxTx
+          VELOCITY_WINDOW_SECONDS: !Ref VelocityWindowSeconds
+          IMPOSSIBLE_TRAVEL_KMH: !Ref ImpossibleTravelKmh
+          AMOUNT_HARD_LIMIT: !Ref AmountHardLimit
+          BLACKLIST_CACHE_TTL: !Ref BlacklistCacheTtl
+
+  # ---------------------------------------------------------------------------
+  # Kinesis trigger with partial batch response and DLQ
+  # ---------------------------------------------------------------------------
+  ProcessorKinesisTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !Ref KinesisStreamArn
+      FunctionName: !GetAtt ProcessorFunction.Arn
+      StartingPosition: LATEST
+      BatchSize: 100
+      MaximumBatchingWindowInSeconds: 30
+      BisectBatchOnFunctionError: true
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt ProcessorDLQ.Arn
+
+Outputs:
+  ProcessorDLQUrl:
+    Value: !Ref ProcessorDLQ
+  ProcessorDLQArn:
+    Value: !GetAtt ProcessorDLQ.Arn
+  IngestionFunctionArn:
+    Value: !GetAtt IngestionFunction.Arn
+  ProcessorFunctionArn:
+    Value: !GetAtt ProcessorFunction.Arn
