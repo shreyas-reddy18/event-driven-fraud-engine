@@ -6,53 +6,33 @@ A real-time, event-driven fraud detection pipeline built for enterprise financia
 
 ## Architecture Overview
 
-```
-Financial System / Client
-         │
-         │  POST /transactions
-         ▼
-┌─────────────────────┐
-│    API Gateway       │  REST endpoint — validates & throttles inbound transactions
-└─────────┬───────────┘
-          │ invoke
-          ▼
-┌─────────────────────┐
-│  Ingestion Lambda    │  Deserializes payload, validates schema, publishes to Kinesis
-└─────────┬───────────┘
-          │ PutRecord (partitioned by account_id)
-          ▼
-┌─────────────────────┐
-│  Kinesis Data Stream │  Durable, ordered event log (configurable shards)
-└─────────┬───────────┘
-          │ trigger (batch, partial batch response enabled)
-          ▼
-┌──────────────────────────────────────────┐
-│  Processor Lambda                         │
-│                                          │
-│  1. Idempotency guard (DynamoDB          │
-│     conditional write — skips            │
-│     duplicate transaction_ids)           │
-│                                          │
-│  2. Rules Engine                         │
-│     ├── Blacklist check                  │
-│     │   (in-memory cache, TTL-refreshed) │
-│     ├── Amount hard limit                │
-│     ├── Velocity check (DynamoDB GSI)    │
-│     └── Geographic impossibility         │
-│                                          │
-│  3. Verdict → DynamoDB + SNS (if BLOCKED)│
-└────────┬─────────────────────────────────┘
-         │ on unrecoverable failure
-         ▼
-┌─────────────────────┐     ┌─────────────┐
-│  SQS Dead Letter     │     │  SNS Topic  │  Fraud alerts to downstream systems
-│  Queue (DLQ)         │     │  (Alerts)   │
-└─────────────────────┘     └─────────────┘
-          │
-          ▼
-┌─────────────────────┐
-│     DynamoDB         │  Transaction records + verdicts (90-day TTL)
-└─────────────────────┘
+```mermaid
+graph TD
+    Client["Financial System / Client"]
+    APIGW["API Gateway\n(HTTP API)"]
+    Ingest["Ingestion Lambda\nValidate schema · publish to Kinesis"]
+    Kinesis["Kinesis Data Stream\nOrdered, durable event log"]
+
+    subgraph proc["Processor Lambda"]
+        direction TB
+        Idempotency["1 · Idempotency Guard\nDynamoDB conditional write\nattribute_not_exists(transaction_id)\nskips duplicate transaction_ids"]
+        Rules["2 · Rules Engine\nBlacklist (in-memory cache, TTL-refreshed)\nAmount Hard Limit · Velocity · Geography"]
+        Verdict["3 · Verdict\nAPPROVED / BLOCKED"]
+        Idempotency -->|new record| Rules
+        Rules --> Verdict
+    end
+
+    DLQ["SQS Dead Letter Queue\n14-day retention"]
+    SNS["SNS Topic\nFraud alerts to downstream systems"]
+    DDB["DynamoDB\nTransaction records + verdicts\n90-day TTL"]
+
+    Client -->|"POST /transactions"| APIGW
+    APIGW -->|"Lambda proxy invoke"| Ingest
+    Ingest -->|"PutRecord · partitioned by account_id"| Kinesis
+    Kinesis -->|"Trigger · batch ≤ 100 records · 30 s window"| Idempotency
+    Verdict -->|"write verdict"| DDB
+    Verdict -->|"if BLOCKED"| SNS
+    proc -->|"unrecoverable failure\nReportBatchItemFailures"| DLQ
 ```
 
 ### Component Responsibilities
