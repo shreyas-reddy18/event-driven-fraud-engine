@@ -1,0 +1,62 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Fraud Pipeline — HTTP API Gateway for transaction ingestion
+
+Parameters:
+  IngestionFunctionArn:
+    Type: String
+    Description: ARN of the fraud-ingestion Lambda function
+  StageName:
+    Type: String
+    Default: v1
+
+Resources:
+
+  FraudApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: fraud-pipeline-api
+      ProtocolType: HTTP
+      Description: Fraud transaction ingestion endpoint
+
+  IngestionIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref FraudApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub
+        - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations
+        - FunctionArn: !Ref IngestionFunctionArn
+      PayloadFormatVersion: "2.0"
+
+  TransactionsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref FraudApi
+      RouteKey: POST /transactions
+      Target: !Sub integrations/${IngestionIntegration}
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref FraudApi
+      StageName: !Ref StageName
+      AutoDeploy: true
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestionFunctionArn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${FraudApi}/*/*/transactions
+
+Outputs:
+  ApiEndpoint:
+    Value: !Sub https://${FraudApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}
+    Export:
+      Name: fraud-pipeline-apigw-Endpoint
+
+  TransactionsUrl:
+    Value: !Sub https://${FraudApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/transactions
+    Export:
+      Name: fraud-pipeline-apigw-TransactionsUrl

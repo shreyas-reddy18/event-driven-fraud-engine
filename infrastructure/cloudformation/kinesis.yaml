@@ -1,0 +1,35 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Fraud Pipeline — Kinesis Data Stream for transaction ingestion
+
+Parameters:
+  ShardCount:
+    Type: Number
+    Default: 1
+    Description: Number of shards for the fraud transactions stream
+  RetentionPeriodHours:
+    Type: Number
+    Default: 24
+    Description: Stream retention period in hours (24–8760)
+
+Resources:
+
+  FraudTransactionsStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: fraud-transactions
+      ShardCount: !Ref ShardCount
+      RetentionPeriodHours: !Ref RetentionPeriodHours
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesis
+
+Outputs:
+  StreamName:
+    Value: !Ref FraudTransactionsStream
+    Export:
+      Name: fraud-pipeline-kinesis-StreamName
+
+  StreamArn:
+    Value: !GetAtt FraudTransactionsStream.Arn
+    Export:
+      Name: fraud-pipeline-kinesis-StreamArn

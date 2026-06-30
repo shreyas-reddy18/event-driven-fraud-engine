@@ -1,0 +1,53 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Fraud Pipeline — DynamoDB table for transaction storage
+
+Parameters:
+  BillingMode:
+    Type: String
+    Default: PAY_PER_REQUEST
+    AllowedValues: [PAY_PER_REQUEST, PROVISIONED]
+
+Resources:
+
+  FraudTransactionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: fraud-transactions
+      BillingMode: !Ref BillingMode
+      AttributeDefinitions:
+        - AttributeName: transaction_id
+          AttributeType: S
+        - AttributeName: account_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: transaction_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: account_id-timestamp-index
+          KeySchema:
+            - AttributeName: account_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+Outputs:
+  TableName:
+    Value: !Ref FraudTransactionsTable
+    Export:
+      Name: fraud-pipeline-dynamodb-TableName
+
+  TableArn:
+    Value: !GetAtt FraudTransactionsTable.Arn
+    Export:
+      Name: fraud-pipeline-dynamodb-TableArn

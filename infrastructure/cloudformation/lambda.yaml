@@ -2,6 +2,13 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: Fraud Pipeline — Lambda functions, IAM roles, Kinesis trigger, and DLQ
 
 Parameters:
+  DeploymentBucket:
+    Type: String
+    Description: S3 bucket containing the Lambda deployment package
+  DeploymentPackageKey:
+    Type: String
+    Default: fraud-lambda.zip
+    Description: S3 key for the Lambda deployment zip
   KinesisStreamArn:
     Type: String
   KinesisStreamName:
@@ -119,6 +126,9 @@ Resources:
       Role: !GetAtt IngestionLambdaRole.Arn
       Timeout: 10
       MemorySize: 256
+      Code:
+        S3Bucket: !Ref DeploymentBucket
+        S3Key: !Ref DeploymentPackageKey
       Environment:
         Variables:
           KINESIS_STREAM_NAME: !Ref KinesisStreamName
@@ -135,6 +145,9 @@ Resources:
       Role: !GetAtt ProcessorLambdaRole.Arn
       Timeout: 60
       MemorySize: 512
+      Code:
+        S3Bucket: !Ref DeploymentBucket
+        S3Key: !Ref DeploymentPackageKey
       Environment:
         Variables:
           KINESIS_STREAM_NAME: !Ref KinesisStreamName

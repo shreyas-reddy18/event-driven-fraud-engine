@@ -1,0 +1,41 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Fraud Pipeline — SNS topic for fraud alert notifications
+
+Parameters:
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Optional email address to subscribe to fraud alerts
+
+Conditions:
+  HasEmailSubscription: !Not [!Equals [!Ref AlertEmail, ""]]
+
+Resources:
+
+  FraudAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: fraud-alerts
+      KmsMasterKeyId: alias/aws/sns
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmailSubscription
+    Properties:
+      TopicArn: !Ref FraudAlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+      FilterPolicy:
+        verdict:
+          - BLOCKED
+
+Outputs:
+  TopicArn:
+    Value: !Ref FraudAlertTopic
+    Export:
+      Name: fraud-pipeline-sns-TopicArn
+
+  TopicName:
+    Value: !GetAtt FraudAlertTopic.TopicName
+    Export:
+      Name: fraud-pipeline-sns-TopicName
