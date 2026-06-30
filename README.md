@@ -59,7 +59,7 @@ Financial System / Client
 
 | Component | Service | Role |
 |---|---|---|
-| REST Ingestion | API Gateway + Lambda | Accept transactions, validate schema, publish to stream |
+| REST Ingestion | API Gateway (HTTP API) + Lambda | Accept transactions, validate schema, publish to stream |
 | Event Stream | Amazon Kinesis Data Streams | Ordered, durable buffer between ingestion and processing |
 | Fraud Processor | AWS Lambda (Kinesis trigger) | Batched rule evaluation with idempotency and DLQ |
 | Transaction Store | Amazon DynamoDB | Low-latency storage for transactions and fraud verdicts |
@@ -96,10 +96,15 @@ fraud-pipeline/
 │
 ├── infrastructure/
 │   └── cloudformation/
-│       ├── api-gateway.yaml    # REST API, usage plan, throttling
+│       ├── api-gateway.yaml    # HTTP API (v2), Lambda proxy integration
 │       ├── kinesis.yaml        # Stream, shard count, retention
 │       ├── lambda.yaml         # Both Lambdas, IAM roles, Kinesis trigger, SQS DLQ
-│       └── dynamodb.yaml       # Tables, indexes, TTL, capacity settings
+│       ├── dynamodb.yaml       # Table, GSI, TTL, capacity settings
+│       └── sns.yaml            # Fraud alert topic, optional email subscription
+│
+├── scripts/
+│   ├── deploy.sh               # Build + upload Lambda zip + deploy all stacks
+│   └── load_test.py            # Load testing script
 │
 └── tests/
     ├── unit/
@@ -107,7 +112,7 @@ fraud-pipeline/
     │   ├── test_storage/       # DynamoDB idempotent write
     │   └── test_ingestion/     # Ingestion handler unit tests
     └── integration/
-        └── test_pipeline.py    # End-to-end flow (moto / localstack)
+        └── test_pipeline.py    # End-to-end flow (moto)
 ```
 
 ---
@@ -158,35 +163,21 @@ fraud-pipeline/
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Run unit tests
-pytest tests/unit/
+# 2. Run tests
+pytest tests/
 
-# 3. Deploy infrastructure (order matters — outputs are cross-referenced)
-aws cloudformation deploy \
-  --template-file infrastructure/cloudformation/kinesis.yaml \
-  --stack-name fraud-pipeline-kinesis
-
-aws cloudformation deploy \
-  --template-file infrastructure/cloudformation/dynamodb.yaml \
-  --stack-name fraud-pipeline-dynamodb
-
-aws cloudformation deploy \
-  --template-file infrastructure/cloudformation/lambda.yaml \
-  --stack-name fraud-pipeline-lambda \
-  --capabilities CAPABILITY_IAM \
-  --parameter-overrides \
-      KinesisStreamArn=<kinesis-arn> \
-      KinesisStreamName=fraud-transactions \
-      DynamoDBTableName=fraud-transactions \
-      SNSAlertTopicArn=<sns-arn>
-
-aws cloudformation deploy \
-  --template-file infrastructure/cloudformation/api-gateway.yaml \
-  --stack-name fraud-pipeline-api \
-  --parameter-overrides IngestionFunctionArn=<ingestion-lambda-arn>
+# 3. Deploy all infrastructure
+#    Creates the S3 artifact bucket, builds and uploads the Lambda zip,
+#    then deploys all five stacks in dependency order.
+bash scripts/deploy.sh
 
 # 4. Submit a test transaction
-curl -X POST https://<api-id>.execute-api.<region>.amazonaws.com/prod/transactions \
+URL=$(aws cloudformation describe-stacks \
+  --stack-name fraud-pipeline-api-gateway \
+  --query "Stacks[0].Outputs[?OutputKey=='TransactionsUrl'].OutputValue" \
+  --output text --region us-east-1)
+
+curl -X POST "$URL" \
   -H "Content-Type: application/json" \
   -d '{
     "transaction_id": "txn_001",
@@ -196,6 +187,34 @@ curl -X POST https://<api-id>.execute-api.<region>.amazonaws.com/prod/transactio
     "currency": "USD",
     "country_code": "US"
   }'
+```
+
+### Stack deployment order (if deploying individually)
+
+```bash
+aws cloudformation deploy --template-file infrastructure/cloudformation/kinesis.yaml \
+  --stack-name fraud-pipeline-kinesis --region us-east-1
+
+aws cloudformation deploy --template-file infrastructure/cloudformation/dynamodb.yaml \
+  --stack-name fraud-pipeline-dynamodb --region us-east-1
+
+aws cloudformation deploy --template-file infrastructure/cloudformation/sns.yaml \
+  --stack-name fraud-pipeline-sns --region us-east-1
+
+# Build and upload Lambda zip first (scripts/deploy.sh handles this automatically)
+aws cloudformation deploy --template-file infrastructure/cloudformation/lambda.yaml \
+  --stack-name fraud-pipeline-lambda --region us-east-1 \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides \
+      DeploymentBucket=<artifact-bucket> \
+      KinesisStreamArn=<kinesis-arn> \
+      KinesisStreamName=fraud-transactions \
+      DynamoDBTableName=fraud-transactions \
+      SNSAlertTopicArn=<sns-arn>
+
+aws cloudformation deploy --template-file infrastructure/cloudformation/api-gateway.yaml \
+  --stack-name fraud-pipeline-api-gateway --region us-east-1 \
+  --parameter-overrides IngestionFunctionArn=<ingestion-lambda-arn>
 ```
 
 ---
@@ -249,7 +268,7 @@ Unrecoverable errors (malformed JSON that passes Kinesis but fails Pydantic, une
 | Attribute | Type | Role |
 |---|---|---|
 | `transaction_id` | String (PK) | Unique transaction identifier; idempotency key |
-| `account_id` | String (SK) | Enables per-account queries |
+| `account_id` | String (GSI hash key) | Enables per-account queries via `account_id-timestamp-index` |
 | `amount` | String | Transaction amount |
 | `merchant_id` | String | Merchant identifier |
 | `currency` | String | ISO 4217 currency code |
@@ -260,7 +279,7 @@ Unrecoverable errors (malformed JSON that passes Kinesis but fails Pydantic, une
 | `evaluated_at` | String (ISO 8601) | Processing time |
 | `ttl` | Number | Unix epoch for automatic expiry (90-day retention) |
 
-**GSI: `account_id-timestamp-index`** — supports velocity lookups and last-transaction queries by account within a time window.
+**GSI: `account_id-timestamp-index`** — hash key `account_id`, sort key `timestamp`; supports velocity lookups and last-transaction queries by account within a time window.
 
 ---
 
